@@ -1,160 +1,119 @@
 #!/usr/bin/env python3
-"""Config Schema Validator - Validate JSON/YAML configs against required fields.
+"""Schema Checker CLI: Validate JSON/YAML config files against required fields.
 
-Validates:
-- Required fields present  
-- Correct datatypes for numbered keys (01, 02, etc.)
-- Empty/undefined values detection
-
-Pure Python, no external dependencies like jsonschema or validators.
-
-Usage:
-  python schema-checker.py config.json
-  echo '{"name":"app"}' | python schema-checker.py -  
-
-Examples:
-  python3 schema-checker.sh myconfig.json
-  python3 schema-checker.sh configs/*.json -r name,url,version
-
+Usage Examples:
+  python3 schema-checker.py config.json --required 'id,name,email'
+  python3 schema-checker.py users.yaml -r 'user_id,username'
+  
+Requirements file format (one field per line):
+  id
+  name
+  email
+  age
 """
 
-import argparse
+import sys
+import json
+import yaml
 
 
-def read_content(path):
-    """Read file or stdin."""
-    if path == '-':
-        return sys.stdin.read()
+def load_required_fields(requirements_file):
+    """Load required fields from a requirements file or command-line list."""
+    if not requirements_file:
+        return set()
+    
+    # Try loading from file first
     try:
-        with open(path, 'r') as f:
-            return f.read()
+        with open(requirements_file, 'r') as f:
+            return {line.strip() for line in f if line.strip()}
     except FileNotFoundError:
-        raise SystemExit(f'Error: File not found ({path})')
+        pass
+    
+    # Otherwise treat as CSV-like input (comma or space separated)
+    return set(requirements_file.split())
 
 
-def find_empty_values(content):
-    """Find keys with empty/null values."""
-    import re
+def validate_json(filepath, required_fields):
+    """Validate a JSON file against required fields."""
     
-    empty_keys = []
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except json.JSONDecodeError as e:
+        print(f'[{filepath}] JSON parse error:', e)
+        return False
     
-    for line_num, line in enumerate(content.splitlines(), 1):
-        stripped = line.strip()
-        
-        # Skip comments and blank lines
-        if not stripped or stripped.startswith('#') or stripped.startswith('#'):
-            continue
-        
-        # Look for assignments: @key: value or key=value
-        # Match @field patterns with empty/null values
-        match = re.match(r'(@?[\w\-\.]+|\$\{?\s*(?:\"[^\"]*|\'][^\'"]*\')[}?[:=]\s*)\s*[\"\']?(null|null|none|[\'\"]?)?\s*$', stripped)
-        
-        if match:
-            value_str = match.group(2) or ''
-            
-            # Determine if value is empty/null
-            is_empty = not value_str or value_str.lower() in ('null', 'none', '', 'undefined')
-            
-            # Extract field name (remove @ prefix for display)
-            field_match = re.match(r'(@[\w\-\.]+)', stripped)
-            
-            if field_match:
-                field_name = field_match.group(1)[1:]  # Remove @
-                
-                if is_empty:
-                    empty_keys.append({
-                        'path': f'${field_name}',
-                        'value': '[empty/undefined]',
-                        'line': line_num
-                    })
+    # Handle nested structures (dict in dict or dict in list)
+    fields_missing = set(required_fields) - data.keys() if isinstance(data, dict) else required_fields
     
-    return empty_keys
-
-
-def find_references(content):
-    """Find all @VAR references in content."""
-    import re
-    
-    refs = set()
-    
-    # Match $@NAME, @$NAME, or bare @NAME patterns
-    refs.update(re.findall(r'(?:\$)?\s*@(\w+)', content))
-    
-    # Match quoted @ref patterns like "@key": value or "@url" etc.  
-    refs.update(re.findall(r'("@[\w\-\.]+)|(@$?\s*[\w\-\.]+)', content))
-    
-    return refs
-
-
-def validate_config(content, required_fields):
-    """Validate config against required fields."""
-    empty_keys = find_empty_values(content)
-    
-    print('\n* Config Schema Validator Report')
-    
-    source_path = f'Source: {path}' if path != '-' else '[stdin]'
-    
-    print(source_path)
-    
-    total_issues = len(empty_keys)
-    
-    # Print each issue  
-    for item in empty_keys[:50]:  # Limit output  
-        print(f"  * Line #{item['line']}: ${item['path']} is undefined/empty (value: '{item.get('value')}' )")
-        
-    if total_issues > 0:
-        print(f'\n* Issues detected: {total_issues}')
+    if fields_missing:
+        missing_str = ', '.join(sorted(fields_missing))
+        print(f'[{filepath}] Missing required fields:', missing_str)
         return False
         
-    print('* No issues detected.')  
+    return True
+
+
+def validate_yaml(filepath, required_fields):
+    """Validate a YAML file against required fields."""
+    
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            data = yaml.safe_load(f)
+    except yaml.YAMLError as e:
+        print(f'[{filepath}] YAML parse error:', e)
+        return False
+    
+    # Handle nested structures (dict in dict or dict in list)
+    fields_missing = set(required_fields) not in [set() for _ in data.keys()] if isinstance(data, dict) else set()
+    
+    if fields_missing:
+        missing_str = ', '.join(sorted(fields_missing))
+        print(f'[{filepath}] Missing required fields:', missing_str)
+        return False
+        
     return True
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Validate JSON/YAML configs against required fields (pure Python)')
+    import argparse
     
-    parser.add_argument('file', nargs='?', default=None, metavar='FILE', 
-                       help='Config file path or "-" for stdin')  
-
-    parser.add_argument('-r', '--required-fields', action='append', dest='fields_list', default=[],
-                       help="Required field name. Can prefix with @ (e.g., @DATABASE_URL). Specify multiple times.")
+    parser = argparse.ArgumentParser(description='Validate config files against schema requirements')
+    
+    parser.add_argument('file', help='JSON or YAML file to validate')  
+    parser.add_argument('-r', '--requirements', metavar='COMMA-SEPARATED', 
+                       help='Required fields (e.g. id,name,email)')
+    parser.add_argument('--requirement-file', '-R', metavar='FILE',
+                       help='Path to a requirements file (one field per line)')
+    parser.add_argument('-v', '--verbose', action='store_true',
+                       help='Show detailed output including found fields')
     
     args = parser.parse_args()
-
-    if not args.file:
-        print('Usage:')  
-        print('  python schema-checker.py <config.json>')  
-        print('  echo \'{"name":"myapp"}\' | python schema-checker.py -')
-        return
+    
+    # Load required fields from either command-line or file
+    req_file = getattr(args, 'requirements', None)  # -r option
+    
+    if not req_file:
+        print('Error: Specify required fields with -r "field1,field2"')
+        sys.exit(1)
         
-    path = args.file
+    # Load requirements
+    actual_requirements = load_required_fields(req_file)
     
-    # Read content  
-    try:
-        content = read_content(path)
-    except SystemExit:
-        raise
-
-    if not content.strip():
-        print('Input configuration is empty')
-        return
+    # Determine file type
+    if args.file.endswith('.json'):
+        success = validate_json(args.file, actual_requirements)
+    elif args.file.endswith(('.yaml', '.yml')):
+        success = validate_yaml(args.file, actual_requirements)
+    else:
+        print(f'[{args.file}] Unknown format: try with .json or .yaml extension')
+        sys.exit(1)
     
-    import re
-    
-    # Find references in content (for validation context)
-    refs_in_content = find_references(content)
-    
-    # Build list of required field names to validate  
-    args_fields_processed = [field[1:].upper() if '@' in field else field.upper() for field in args.fields_list]
-    
-    # Remove duplicates and normalize  
-    normalized_fields = {field: field for field in args_fields_processed}
-    
-    # Process empty values from content 
-    empty_keys = find_empty_values(content)
-
-    # Print validation results  
-    validate_config(content, args_fields_processed)
+    if not success:
+        print('Validation failed')
+        sys.exit(2)
+        
+    print('[SUCCESS] All required fields present:', ', '.join(sorted(actual_requirements)))
 
 
 if __name__ == '__main__':  
